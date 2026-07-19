@@ -6,125 +6,121 @@ using namespace std;
 
 void KVStore::descriptor(string &input, string &cmd, string &key, string &value, int bytes){
     int i = 0;
-    while(i < bytes && input[i] == ' '){
-        i++;
-    }
-    for(i; i < bytes; i++){
-        if(input[i] != ' ' && input[i] != '\0' && input[i] != '\n'){
+    while (i < bytes && input[i] == ' ') i++;
+    for (; i < bytes; i++) {
+        if (input[i] != ' ' && input[i] != '\0' && input[i] != '\n') {
             cmd.push_back(input[i]);
-        }
-        else{
+        } else {
             break;
         }
     }
-    while(i < bytes && input[i] == ' '){
-        i++;
-    }
-    for(i; i < bytes; i++){
-        if(input[i] != ' ' && input[i] != '\0' && input[i] != '\n'){
+    while (i < bytes && input[i] == ' ') i++;
+    for (; i < bytes; i++) {
+        if (input[i] != ' ' && input[i] != '\0' && input[i] != '\n') {
             key.push_back(input[i]);
-        }
-        else{
+        } else {
             break;
         }
     }
-    while(i < bytes && input[i] == ' '){
-        i++;
-    }
-    for(i; i < bytes; i++){
-        if(input[i] != ' ' && input[i] != '\0' && input[i] != '\n'){
+    while (i < bytes && input[i] == ' ') i++;
+    for (; i < bytes; i++) {
+        if (input[i] != ' ' && input[i] != '\0' && input[i] != '\n') {
             value.push_back(input[i]);
-        }
-        else{
+        } else {
             break;
         }
+    }
+}
+
+void KVStore::applyParsedEntry(const string &cmd, const string &key, const string &value){
+    lock_guard<mutex> lock(mtx);
+    if (cmd == "SET") {
+        store[key] = value;
+    } else if (cmd == "DEL") {
+        store.erase(key);
     }
 }
 
 string KVStore::validator(int clientFd, string &cmd, string &key, string &value){
-        string msg;
-    if(cmd == "SET"){
-        if(!key.empty() && !value.empty()){
-            cmd = cmd + " " + key + " " + value;
-            {
-                lock_guard<mutex> lock(mtx);
-                append(cmd);
-                store[key] = value;
-            }
+    string msg;
+    if (cmd == "SET") {
+        if (!key.empty() && !value.empty()) {
+            string entry = cmd + " " + key + " " + value;
+            lock_guard<mutex> lock(mtx);
+            append(entry);
+            store[key] = value;
             msg = "OK\n";
-        }
-        else if(key.empty() && value.empty()){
+        } else if (key.empty() && value.empty()) {
             msg = "ERR : KEY AND VALUE MISSING\n";
-        }
-        else{
+        } else {
             msg = "ERR : VALUE MISSING\n";
         }
-        
-    }
-    else if(cmd == "GET"){
-        if(!key.empty() && store.count(key) == 1 && value.empty()){
-            {
-                lock_guard<mutex> lock(mtx);
-                msg = store[key] + "\n";
-            }
-            
-            cmd = cmd + " " + key;
-        } 
-        else if(store.count(key) == 0 && !key.empty() && value.empty()){
+    } else if (cmd == "GET") {
+        if (!key.empty() && store.count(key) == 1 && value.empty()) {
+            lock_guard<mutex> lock(mtx);
+            msg = store[key] + "\n";
+        } else if (store.count(key) == 0 && !key.empty() && value.empty()) {
             msg = "NULL\n";
-        }
-        else if(key.empty()){
+        } else if (key.empty()) {
             msg = "ERR : TOO FEW ARGUMENTS\n";
-        }
-        else{
+        } else {
             msg = "ERR : TOO MANY ARGUMENTS\n";
         }
-    }
-    else if(cmd == "DEL"){
-        if(!key.empty() && store.count(key) && value.empty()){
-            cmd = cmd + " " + key;
-            {
-                lock_guard<mutex> lock(mtx);
-                append(cmd);
-                store.erase(key);
-            }
-            
+    } else if (cmd == "DEL") {
+        if (!key.empty() && store.count(key) && value.empty()) {
+            string entry = cmd + " " + key;
+            lock_guard<mutex> lock(mtx);
+            append(entry);
+            store.erase(key);
             msg = "OK\n";
-        }
-        else if(!key.empty() && !store.count(key) && value.empty()){
+        } else if (!key.empty() && !store.count(key) && value.empty()) {
             msg = "ERR: KEY NOT FOUND\n";
-        }
-        else if(key.empty()){
+        } else if (key.empty()) {
             msg = "ERR : TOO FEW ARGUMENTS\n";
-        }
-        else{
+        } else {
             msg = "ERR : TOO MANY ARGUMENTS\n";
         }
-    }
-    else{
+    } else {
         msg = "ERR : INVALID COMMANDS OR ARGUMENTS\n";
     }
     return msg;
-    
 }
 
 void KVStore::restore(){
     vector<string> logs;
-    string path = WALPath;
+    string path = walPath;
     readBack(logs, path);
-    for(auto &entry : logs){
+    for (auto &entry : logs) {
         string cmd, key, value;
         descriptor(entry, cmd, key, value, entry.size());
-        if(cmd == "SET"){
+        if (cmd == "SET") {
             store[key] = value;
-        }
-        else if(cmd == "GET"){
-            continue;
-        }
-        else if(cmd == "DEL"){
+        } else if (cmd == "DEL") {
             store.erase(key);
         }
     }
     cout << "WAL Loaded" << endl;
 }
 
+void KVStore::setWalPath(const string &path){
+    walPath = path;
+    initWal(walPath);
+}
+
+bool KVStore::applyEntry(const string &entry){
+    string cmd, key, value;
+    descriptor(const_cast<string &>(entry), cmd, key, value, entry.size());
+    if (cmd == "SET" || cmd == "DEL") {
+        applyParsedEntry(cmd, key, value);
+        string record = entry;
+        append(record);
+        return true;
+    }
+    return false;
+}
+
+string KVStore::getValue(const string &key){
+    lock_guard<mutex> lock(mtx);
+    if (store.count(key)) return store[key];
+    return "";
+}
